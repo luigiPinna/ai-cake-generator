@@ -1,7 +1,7 @@
 from PIL import Image
 import os
 
-input_dir = "cake-generator/data/torte"
+input_dir = "cake-generator/data/cakes"
 
 for file in os.listdir(input_dir):
     if file.endswith(('.jpg', '.png', '.jpeg')):
