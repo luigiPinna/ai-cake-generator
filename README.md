@@ -56,6 +56,8 @@ cake-generator/
 │
 ├── models/                # Folder where trained models will be saved
 │
+├── utils/                # Utils folder
+│
 ├── scripts/
 │   ├── train.py           # Script for model training
 │   └── generate.py        # Script for generating new images
@@ -177,3 +179,12 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ---
 
 For questions, suggestions, or improvements, please open an issue or contact the repository maintainer.
+
+### TODO:
+
+Improving quality image and training outcome:
+
+- Implement data augmentation to increase the training dataset
+- Add validation during training to monitor quality
+- Integrate SDXL as a base model for higher quality
+- Add support for negative prompts during generation  
