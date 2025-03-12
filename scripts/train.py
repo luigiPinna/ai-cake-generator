@@ -1,13 +1,10 @@
 import os
 import argparse
-
 import numpy as np
-from diffusers import StableDiffusionPipeline, DiffusionPipeline, DDPMScheduler
+from diffusers import StableDiffusionPipeline
 import torch
-from transformers import CLIPTextModel, CLIPTokenizer
-from diffusers.optimization import get_scheduler
-from diffusers.training_utils import EMAModel
-from diffusers.loaders import AttnProcsLayers
+import gc
+
 from diffusers.models.attention_processor import LoRAAttnProcessor
 from tqdm.auto import tqdm
 from PIL import Image
@@ -15,109 +12,129 @@ import random
 
 
 def parse_args():
-   parser = argparse.ArgumentParser(description="Train Stable Diffusion on cake images")
-   parser.add_argument("--data_dir", type=str, default="../data/cakes", help="Directory containing cake images")
-   parser.add_argument("--output_dir", type=str, default="../models/torte_model",
-                       help="Directory to save the model")
-   parser.add_argument("--base_model", type=str, default="runwayml/stable-diffusion-v1-5",
-                       help="Base model to use")
-   parser.add_argument("--resolution", type=int, default=512, help="Image resolution")
-   parser.add_argument("--train_batch_size", type=int, default=1, help="Training batch size")
-   parser.add_argument("--learning_rate", type=float, default=2e-6, help="Initial learning rate")
-   parser.add_argument("--max_train_steps", type=int, default=400, help="Total number of training steps")
-   parser.add_argument("--use_lora", action="store_true", help="Use LoRA for training (requires fewer resources)")
-   return parser.parse_args()
+    parser = argparse.ArgumentParser(description="Train Stable Diffusion on cake images")
+    parser.add_argument("--data_dir", type=str, default="../data/cakes")
+    parser.add_argument("--output_dir", type=str, default="../models/torte_model")
+    parser.add_argument("--resolution", type=int, default=256)
+    parser.add_argument("--max_train_steps", type=int, default=50)
+    parser.add_argument("--batch_size", type=int, default=1)
+    return parser.parse_args()
 
 
 def main():
-   args = parse_args()
+    args = parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
 
-   # Create output directory if it doesn't exist
-   os.makedirs(args.output_dir, exist_ok=True)
+    # Enable memory efficient attention
+    pipeline = StableDiffusionPipeline.from_pretrained(
+        "runwayml/stable-diffusion-v1-5",
+        torch_dtype=torch.float16,
+        use_safetensors=True,
+        variant="fp16",
+        local_files_only=False,
+        force_download=False,
+        resume_download=True,
+        proxies=None,
+        timeout=100000
+    )
 
-   # Load the base model
-   pipeline = StableDiffusionPipeline.from_pretrained(
-       args.base_model,
-       torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-   )
+    # Memory optimizations
+    pipeline.enable_attention_slicing(1)
+    pipeline.enable_vae_slicing()
+    pipeline.enable_model_cpu_offload()
 
-   if torch.cuda.is_available():
-       pipeline = pipeline.to("cuda")
+    # LoRA setup with reduced parameters
+    unet = pipeline.unet
+    for name, module in unet.named_modules():
+        if name.endswith("attn1") or name.endswith("attn2"):
+            module.processor = LoRAAttnProcessor(
+                hidden_size=module.to_q.in_features,
+                cross_attention_dim=module.to_k.in_features if hasattr(module, "to_k") else None,
+                rank=4  # Reduced rank
+            )
 
-   # Training method: LoRA or full DreamBooth
-   if args.use_lora:
-       print("Using LoRA for training...")
-       # LoRA configuration
-       for name, module in pipeline.unet.named_modules():
-           if name.endswith("attn1") or name.endswith("attn2"):
-               module.processor = LoRAAttnProcessor(
-                   hidden_size=module.processor.hidden_size,
-                   cross_attention_dim=module.processor.cross_attention_dim if hasattr(module.processor,
-                                                                                       "cross_attention_dim") else None,
-                   rank=16,
-               )
+    # Optimizer with reduced learning rate
+    optimizer = torch.optim.AdamW(
+        unet.parameters(),
+        lr=1e-5,
+        weight_decay=0.01
+    )
 
-       # Optimizer
-       optimizer_cls = torch.optim.AdamW
-       optimizer = optimizer_cls(
-           pipeline.unet.parameters(),
-           lr=args.learning_rate,
-       )
-   else:
-       print("Using DreamBooth for training...")
-       # DreamBooth (full training)
-       optimizer_cls = torch.optim.AdamW
-       optimizer = optimizer_cls(
-           pipeline.unet.parameters(),
-           lr=args.learning_rate,
-       )
+    # Load and prepare text encoder
+    text_encoder = pipeline.text_encoder
+    tokenizer = pipeline.tokenizer
 
-   # Dataset creation (simplified)
-   image_paths = [os.path.join(args.data_dir, f) for f in os.listdir(args.data_dir)
-                  if f.endswith(('.jpg', '.png', '.jpeg'))]
+    # Get image paths
+    image_paths = [
+        os.path.join(args.data_dir, f) for f in os.listdir(args.data_dir)
+        if f.lower().endswith(('.jpg', '.png', '.jpeg'))
+    ]
+    print(f"Found {len(image_paths)} images for training")
 
-   print(f"Found {len(image_paths)} images for training")
+    # Training loop
+    progress_bar = tqdm(range(args.max_train_steps))
 
-   # Simplified training loop
-   progress_bar = tqdm(range(args.max_train_steps))
-   progress_bar.set_description("Training steps")
+    for step in range(args.max_train_steps):
+        # Clear memory
+        if step % 10 == 0:
+            gc.collect()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-   for step in range(args.max_train_steps):
-       # Select a random image for each batch
-       img_path = random.choice(image_paths)
-       img = Image.open(img_path).convert("RGB").resize((args.resolution, args.resolution))
+        try:
+            # Load and prepare image
+            img_path = random.choice(image_paths)
+            img = Image.open(img_path).convert("RGB").resize((args.resolution, args.resolution))
+            img_tensor = torch.from_numpy(np.array(img)).float() / 127.5 - 1.0
+            img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
 
-       # Input preparation
-       input_img = torch.from_numpy(np.array(img)).float() / 127.5 - 1.0
-       input_img = input_img.permute(2, 0, 1).unsqueeze(0).to(pipeline.device)
+            # Prepare text input
+            text_input = tokenizer(
+                "a photo of a cake",
+                padding="max_length",
+                max_length=tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt"
+            )
 
-       # Training step
-       optimizer.zero_grad()
+            # Training step
+            optimizer.zero_grad()
 
-       # Add training logic here (simplified for demonstration purposes)
-       noise = torch.randn_like(input_img)
-       timesteps = torch.randint(0, pipeline.scheduler.config.num_train_timesteps, (1,), device=pipeline.device)
-       noisy_images = pipeline.scheduler.add_noise(input_img, noise, timesteps)
+            # Get text embeddings
+            with torch.no_grad():
+                encoder_hidden_states = text_encoder(text_input.input_ids)[0]
 
-       # Pass through UNet
-       noise_pred = pipeline.unet(noisy_images, timesteps).sample
+            # Add noise
+            noise = torch.randn_like(img_tensor)
+            timesteps = torch.randint(0, pipeline.scheduler.config.num_train_timesteps, (1,))
+            noisy_images = pipeline.scheduler.add_noise(img_tensor, noise, timesteps)
 
-       # Calculate loss
-       loss = torch.nn.functional.mse_loss(noise_pred, noise)
-       loss.backward()
-       optimizer.step()
+            # Get model prediction
+            noise_pred = unet(
+                noisy_images,
+                timesteps,
+                encoder_hidden_states=encoder_hidden_states
+            ).sample
 
-       progress_bar.update(1)
+            # Calculate loss and optimize
+            loss = torch.nn.functional.mse_loss(noise_pred, noise)
+            loss.backward()
+            optimizer.step()
 
-       # Save the model every 100 steps and at the end
-       if step % 100 == 0 or step == args.max_train_steps - 1:
-           pipeline.save_pretrained(args.output_dir)
-           print(f"Model saved to {args.output_dir}")
+            progress_bar.update(1)
 
-   # Save the final model
-   pipeline.save_pretrained(args.output_dir)
-   print(f"Training completed! Model saved to {args.output_dir}")
+            # Save checkpoint
+            if (step + 1) % 25 == 0:
+                pipeline.save_pretrained(args.output_dir)
+                print(f"\nCheckpoint saved at step {step + 1}")
+
+        except Exception as e:
+            print(f"Error at step {step}: {str(e)}")
+            continue
+
+    # Save final model
+    pipeline.save_pretrained(args.output_dir)
+    print("Training completed!")
 
 
 if __name__ == "__main__":
-   main()
+    main()
