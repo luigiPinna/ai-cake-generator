@@ -34,16 +34,21 @@ class CakeGeneratorChat:
                 subfolder="tokenizer"
             )
 
+            # Load the text encoder model that converts text prompts to embeddings
             self.text_encoder = CLIPTextModel.from_pretrained(
                 "CompVis/stable-diffusion-v1-4",
                 subfolder="text_encoder"
             ).to(self.device)
 
+            # Load the Variational Autoencoder (VAE) component
+            # - The VAE is responsible for encoding images into latent space and decoding them back to pixel space
             self.vae = AutoencoderKL.from_pretrained(
                 "CompVis/stable-diffusion-v1-4",
                 subfolder="vae"
             ).to(self.device)
 
+            # Load the noise scheduler that controls the diffusion process
+            # - The DDPM (Denoising Diffusion Probabilistic Model) scheduler controls how noise is added and removed
             self.scheduler = DDPMScheduler.from_pretrained(
                 "CompVis/stable-diffusion-v1-4",
                 subfolder="scheduler"
@@ -105,8 +110,16 @@ class CakeGeneratorChat:
         print("Model loaded successfully!")
 
     def generate_cake(self, prompt):
-        # Enhance the prompt
-        enhanced_prompt = f"A realistic photo of an artisanal cake: {prompt}, high quality, detailed"
+        # Enhance the prompt with more detailed instructions
+        enhanced_prompt = (
+            f"A professional photograph of a gourmet {prompt}, detailed cake texture, "
+            f"bakery lighting, food photography, centered composition, "
+            f"full view of the entire cake, high resolution, 4k, detailed decorations, "
+            f"on elegant cake stand"
+        )
+
+        # Negative prompt to avoid cutoffs and improve quality
+        negative_prompt = "cut off, cropped, low quality, blurry, distorted, deformed, disfigured, bad proportions, out of frame"
 
         # Generate the image
         start_time = time.time()
@@ -121,10 +134,12 @@ class CakeGeneratorChat:
             with torch.no_grad():
                 image = self.pipeline(
                     prompt=enhanced_prompt,
+                    negative_prompt=negative_prompt,
                     num_images_per_prompt=1,
-                    num_inference_steps=30,  # Reduced from 50 to 30 for speed
+                    num_inference_steps=40,  # Increased from 30 to 40 for better quality
                     height=512,
                     width=512,
+                    guidance_scale=7.5,  # Added guidance scale for better prompt adherence
                 ).images[0]
 
             end_time = time.time()
@@ -133,13 +148,13 @@ class CakeGeneratorChat:
             generation_time = round(end_time - start_time, 2)
 
             # Prepare the response
-            response = f"I generated your cake in {generation_time} seconds."
+            response = f"Ho generato la tua torta in {generation_time} secondi."
 
             return image, response
 
         except Exception as e:
             # Handle any errors during generation
-            error_message = f"Sorry, I couldn't generate the cake. Error: {str(e)}"
+            error_message = f"Mi dispiace, non sono riuscito a generare la torta. Errore: {str(e)}"
             print(error_message)
 
             # Return a placeholder or None for the image
@@ -150,41 +165,57 @@ def main():
     # Initialize the cake generator
     cake_generator = CakeGeneratorChat()
 
-    # Chat history
-    chat_history = []
-
     # Message processing function
     def chat(message, history):
         history.append((message, ""))
 
-        if any(keyword in message.lower() for keyword in ["torta", "dolce", "cake", "genera", "crea"]):
+        # Expanded list of cake-related keywords in multiple languages
+        cake_keywords = ["torta", "dolce", "cake", "genera", "crea", "pasticcino",
+                         "dessert", "pastry", "gateau", "bake", "kuchen", "tarta"]
+
+        if any(keyword in message.lower() for keyword in cake_keywords):
             # This is a cake generation request
             image, response = cake_generator.generate_cake(message)
             history[-1] = (history[-1][0], response)
             return history, image
         else:
             # This is a normal conversation
-            response = "Hello! I'm your cake generation assistant. Describe the cake you want and I'll create it for you."
+            response = "Ciao! Sono il tuo assistente per la generazione di torte. Descrivimi la torta che desideri e la creerò per te."
             history[-1] = (history[-1][0], response)
             return history, None
 
-    # Gradio interface
+    # Gradio interface with improved layout
     with gr.Blocks() as demo:
-        gr.Markdown("# AI Cake Generator")
-        gr.Markdown("Describe the cake you want and the AI will generate it for you!")
+        gr.Markdown("# Generatore di Torte AI")
+        gr.Markdown("Descrivi la torta che desideri e l'AI la genererà per te!")
 
         with gr.Row():
             with gr.Column(scale=3):
-                chatbot = gr.Chatbot([], elem_id="chatbot", height=400)
+                chatbot = gr.Chatbot([], elem_id="chatbot", height=500)
                 msg = gr.Textbox(
                     show_label=False,
-                    placeholder="Describe the cake you want...",
+                    placeholder="Descrivi la torta che desideri...",
                     container=False
                 )
-                btn = gr.Button("Send")
+                btn = gr.Button("Invia")
 
             with gr.Column(scale=2):
-                output_image = gr.Image(label="Your generated cake", height=400)
+                # Increased height for better image display
+                output_image = gr.Image(label="La tua torta generata", height=500, type="pil")
+
+        # Add instructions for better prompts
+        with gr.Accordion("Suggerimenti per prompt migliori", open=False):
+            gr.Markdown("""
+            ### Come ottenere risultati migliori:
+
+            1. **Sii specifico** - Descrivi dettagli come gusti, decorazioni, colori
+            2. **Menziona la forma** - "Torta rotonda", "torta a più strati", ecc.
+            3. **Specifica lo stile** - "Elegante", "rustico", "minimalista"
+            4. **Esempi di buoni prompt**:
+               - "Torta al cioccolato a tre strati con ganache e lamponi freschi in stile elegante"
+               - "Torta nuziale bianca con decorazioni floreali blu e argento"
+               - "Cheesecake al limone con topping di mirtilli e base di biscotto"
+            """)
 
         btn.click(chat, inputs=[msg, chatbot], outputs=[chatbot, output_image])
         msg.submit(chat, inputs=[msg, chatbot], outputs=[chatbot, output_image])
