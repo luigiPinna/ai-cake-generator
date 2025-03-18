@@ -15,7 +15,7 @@ This project allows you to fine-tune a Stable Diffusion model using your own col
 
 ## Requirements
 
-- Python 3.9+ (Python 3.10 recommended for best compatibility)
+- Python 3.12+ (Python 3.10 recommended for best compatibility)
 - GPU for training (can use Google Colab or other free GPU services)
 - 20-30 high-quality cake images for training
 - 10GB+ free disk space
